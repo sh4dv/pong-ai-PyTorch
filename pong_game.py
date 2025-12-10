@@ -89,6 +89,9 @@ class PongGame:
         reward_left = REWARD_NEUTRAL
         reward_right = REWARD_NEUTRAL
         
+        # Store previous ball position for miss detection
+        prev_ball_x = self.ball_x
+        
         # Move paddles based on actions
         self._move_paddle(1, action_left)
         self._move_paddle(2, action_right)
@@ -103,10 +106,21 @@ class PongGame:
             self.ball_y = np.clip(self.ball_y, 0, WINDOW_HEIGHT - BALL_SIZE)
         
         # Ball collision with left paddle
+        paddle_hit_left = False
         if (self.ball_x <= PADDLE_OFFSET + PADDLE_WIDTH and
             self.paddle1_y <= self.ball_y <= self.paddle1_y + PADDLE_HEIGHT):
             self._handle_paddle_hit(1)
             reward_left = REWARD_HIT_BALL
+            paddle_hit_left = True
+        # Dense reward: proximity to ball for left paddle (only when ball approaching and not hit)
+        elif self.ball_x < WINDOW_WIDTH / 2 and self.ball_vel_x < 0:
+            paddle1_center = self.paddle1_y + PADDLE_HEIGHT / 2
+            ball_center = self.ball_y + BALL_SIZE / 2
+            distance = abs(paddle1_center - ball_center)
+            max_distance = WINDOW_HEIGHT
+            # Normalize distance and apply small reward
+            proximity_reward = REWARD_PROXIMITY * max(0, 1 - distance / max_distance)
+            reward_left = proximity_reward  # Replace, don't add
         
         # Ball collision with right paddle
         if (self.ball_x >= WINDOW_WIDTH - PADDLE_OFFSET - PADDLE_WIDTH - BALL_SIZE and
@@ -116,10 +130,13 @@ class PongGame:
         
         # Check if ball went out of bounds (scoring)
         if self.ball_x < 0:
-            # Right player scores
+            # Right player scores - left paddle missed
             self.score2 += 1
             reward_right = REWARD_SCORE_POINT
             reward_left = REWARD_LOSE_POINT
+            # Additional penalty for missing when ball was in range
+            if prev_ball_x > 0 and prev_ball_x < PADDLE_OFFSET + PADDLE_WIDTH + 50:
+                reward_left += REWARD_MISS_BALL
             self._reset_ball()
             
             if self.score2 >= WINNING_SCORE:
