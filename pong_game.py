@@ -35,13 +35,16 @@ class PongGame:
         self.ball_x = WINDOW_WIDTH // 2
         self.ball_y = WINDOW_HEIGHT // 2
         
-        # Ball velocity (random direction)
-        self.ball_vel_x = BALL_SPEED_X * np.random.choice([-1, 1])
-        self.ball_vel_y = BALL_SPEED_Y * np.random.choice([-1, 1])
+        # Ball velocity (random direction with bounded angle)
+        self.ball_vel_x, self.ball_vel_y = self._random_launch_velocity()
         
         # Paddle positions (centered vertically)
         self.paddle1_y = WINDOW_HEIGHT // 2 - PADDLE_HEIGHT // 2
         self.paddle2_y = WINDOW_HEIGHT // 2 - PADDLE_HEIGHT // 2
+
+        # Paddle speeds (can be customized externally)
+        self.paddle1_speed = PADDLE_SPEED
+        self.paddle2_speed = PADDLE_SPEED
         
         # Scores
         self.score1 = 0
@@ -164,21 +167,28 @@ class PongGame:
         """
         if paddle_num == 1:
             if action == 1:  # Move up
-                self.paddle1_y -= PADDLE_SPEED
+                self.paddle1_y -= self.paddle1_speed
             elif action == 2:  # Move down
-                self.paddle1_y += PADDLE_SPEED
+                self.paddle1_y += self.paddle1_speed
             
             # Keep paddle within bounds
             self.paddle1_y = np.clip(self.paddle1_y, 0, WINDOW_HEIGHT - PADDLE_HEIGHT)
         
         elif paddle_num == 2:
             if action == 1:  # Move up
-                self.paddle2_y -= PADDLE_SPEED
+                self.paddle2_y -= self.paddle2_speed
             elif action == 2:  # Move down
-                self.paddle2_y += PADDLE_SPEED
+                self.paddle2_y += self.paddle2_speed
             
             # Keep paddle within bounds
             self.paddle2_y = np.clip(self.paddle2_y, 0, WINDOW_HEIGHT - PADDLE_HEIGHT)
+
+    def set_paddle_speed(self, paddle_num, speed):
+        """Set paddle speed for a given paddle."""
+        if paddle_num == 1:
+            self.paddle1_speed = speed
+        elif paddle_num == 2:
+            self.paddle2_speed = speed
     
     def _handle_paddle_hit(self, paddle_num):
         """
@@ -213,8 +223,15 @@ class PongGame:
         """Reset ball to center with random direction."""
         self.ball_x = WINDOW_WIDTH // 2
         self.ball_y = WINDOW_HEIGHT // 2
-        self.ball_vel_x = BALL_SPEED_X * np.random.choice([-1, 1])
-        self.ball_vel_y = BALL_SPEED_Y * np.random.choice([-1, 1])
+        self.ball_vel_x, self.ball_vel_y = self._random_launch_velocity()
+
+    def _random_launch_velocity(self):
+        angle = np.deg2rad(np.random.uniform(LAUNCH_ANGLE_MIN_DEG, LAUNCH_ANGLE_MAX_DEG))
+        horiz_sign = np.random.choice([-1, 1])
+        vert_sign = np.random.choice([-1, 1])
+        vx = horiz_sign * BALL_SPEED_X * np.cos(angle)
+        vy = vert_sign * BALL_SPEED_Y * np.sin(angle)
+        return vx, vy
     
     def get_scores(self):
         """

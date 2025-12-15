@@ -97,6 +97,58 @@ class PongTrainer:
         self.losses = []
         self.scores_left = []
         self.scores_right = []
+        self.reward_breakdowns = []
+        # Track raw positive/negative reward mass per episode to report prize vs penalty split
+        self.reward_signals = []
+
+    def _extract_reward_breakdown(self, infos, env_idx, breakdown_keys):
+        """Best-effort extraction of reward_breakdown for a specific env index from vector env infos."""
+        rb_env = None
+
+        # Case 1: infos is a list/tuple of per-env dicts (AsyncVectorEnv common)
+        if isinstance(infos, (list, tuple)):
+            if len(infos) > env_idx and isinstance(infos[env_idx], dict):
+                rb_env = infos[env_idx].get('reward_breakdown')
+                if rb_env is None and 'final_info' in infos[env_idx] and isinstance(infos[env_idx]['final_info'], dict):
+                    rb_env = infos[env_idx]['final_info'].get('reward_breakdown')
+            return rb_env
+
+        # Case 2: infos is a dict (SyncVectorEnv) possibly containing nested structures
+        if isinstance(infos, dict):
+            if 'reward_breakdown' in infos:
+                rb_all = infos['reward_breakdown']
+
+                # 2a: tuple/list/ndarray of per-env dicts
+                if isinstance(rb_all, (list, tuple, np.ndarray)):
+                    if len(rb_all) > env_idx:
+                        rb_env = rb_all[env_idx]
+
+                # 2b: dict keyed by env index
+                elif isinstance(rb_all, dict) and env_idx in rb_all:
+                    rb_env = rb_all.get(env_idx)
+
+                # 2c: dict-of-arrays keyed by breakdown keys (some gym versions do this)
+                elif isinstance(rb_all, dict) and set(breakdown_keys).issubset(rb_all.keys()):
+                    rb_env = {}
+                    for k in breakdown_keys:
+                        val = rb_all[k]
+                        if isinstance(val, (list, tuple, np.ndarray)) and len(val) > env_idx:
+                            rb_env[k] = val[env_idx]
+                        else:
+                            rb_env[k] = val
+
+            # 2d: reward_breakdown may live inside final_info
+            if rb_env is None and 'final_info' in infos:
+                fi_all = infos['final_info']
+                if isinstance(fi_all, (list, tuple, np.ndarray)):
+                    if len(fi_all) > env_idx and isinstance(fi_all[env_idx], dict):
+                        rb_env = fi_all[env_idx].get('reward_breakdown')
+                elif isinstance(fi_all, dict):
+                    maybe_fi = fi_all.get(env_idx)
+                    if isinstance(maybe_fi, dict):
+                        rb_env = maybe_fi.get('reward_breakdown')
+
+        return rb_env
     
     def train_episode(self, episode_num):
         """
@@ -125,8 +177,19 @@ class PongTrainer:
         """
         state, _ = self.env.reset()
         total_reward = 0
+        pos_reward = 0.0
+        neg_reward = 0.0
         episode_length = 0
         episode_losses = []
+        episode_breakdown = {
+            'hit_ball': 0.0,
+            'score_point': 0.0,
+            'lose_point': 0.0,
+            'miss_ball': 0.0,
+            'proximity': 0.0,
+            'far_penalty': 0.0,
+            'neutral': 0.0
+        }
         
         # Determine if we should render this episode
         should_render = (not self.headless and self.renderer is not None and 
@@ -146,6 +209,12 @@ class PongTrainer:
             
             # Store transition in replay buffer
             self.agent.store_transition(state, action, reward, next_state, terminated or truncated)
+
+            # Track reward sources for this episode if available
+            if 'reward_breakdown' in info:
+                for key, value in info['reward_breakdown'].items():
+                    if key in episode_breakdown:
+                        episode_breakdown[key] += value
             
             # Train the agent
             loss = self.agent.train(self.batch_size)
@@ -155,6 +224,10 @@ class PongTrainer:
             # Update state and statistics
             state = next_state
             total_reward += reward
+            if reward >= 0:
+                pos_reward += reward
+            else:
+                neg_reward -= reward  # store positive magnitude for penalties
             episode_length += 1
             
             # Render if needed
@@ -177,7 +250,10 @@ class PongTrainer:
             'loss': avg_loss,
             'score_left': info.get('score_left', 0),
             'score_right': info.get('score_right', 0),
-            'action_dist': action_dist
+            'action_dist': action_dist,
+            'reward_breakdown': episode_breakdown,
+            'pos_reward': pos_reward,
+            'neg_reward': neg_reward
         }
     
     def _train_episode_vectorized(self, episode_num):
@@ -195,9 +271,15 @@ class PongTrainer:
         
         total_rewards = np.zeros(self.num_envs)
         episode_lengths = np.zeros(self.num_envs)
+        pos_rewards = np.zeros(self.num_envs)
+        neg_rewards = np.zeros(self.num_envs)
         all_losses = []
         final_scores_left = []
         final_scores_right = []
+        # Track reward breakdown per env and aggregated across envs
+        breakdown_keys = ['hit_ball', 'score_point', 'lose_point', 'miss_ball', 'proximity', 'far_penalty', 'neutral']
+        breakdown_sums = [dict.fromkeys(breakdown_keys, 0.0) for _ in range(self.num_envs)]
+        total_breakdown = dict.fromkeys(breakdown_keys, 0.0)
         
         # Track which environments are still running
         active_envs = np.ones(self.num_envs, dtype=bool)
@@ -229,11 +311,23 @@ class PongTrainer:
                     # Store transition
                     done = terminateds[i] or truncateds[i]
                     self.agent.store_transition(states[i], actions[i], rewards[i], next_states[i], done)
-                    
+
+                    # Update reward breakdown if provided (handle different vector info shapes)
+                    rb_env = self._extract_reward_breakdown(infos, i, breakdown_keys)
+                    if isinstance(rb_env, dict):
+                        for k in breakdown_keys:
+                            if k in rb_env:
+                                breakdown_sums[i][k] += rb_env[k]
+                                total_breakdown[k] += rb_env[k]
+
                     # Update statistics
                     total_rewards[i] += rewards[i]
+                    if rewards[i] >= 0:
+                        pos_rewards[i] += rewards[i]
+                    else:
+                        neg_rewards[i] -= rewards[i]
                     episode_lengths[i] += 1
-                    
+
                     # Check if episode ended
                     if done:
                         active_envs[i] = False
@@ -286,7 +380,10 @@ class PongTrainer:
             'length': np.mean(episode_lengths),
             'loss': avg_loss,
             'score_left': avg_score_left,
-            'score_right': avg_score_right
+            'score_right': avg_score_right,
+            'reward_breakdown': total_breakdown,
+            'pos_reward': float(np.sum(pos_rewards)),
+            'neg_reward': float(np.sum(neg_rewards))
         }
     
     def _simple_ai_action(self, state):
@@ -308,6 +405,8 @@ class PongTrainer:
         # Resume from checkpoint if specified
         if resume_from and os.path.exists(resume_from):
             self.agent.load(resume_from)
+            # Reopen exploration when resuming to escape bad local minima
+            self.agent.epsilon = max(self.agent.epsilon, 0.35)
             print(f"Resumed training from {resume_from}")
         
         print(f"\nStarting training for {self.num_episodes} episodes")
@@ -321,8 +420,6 @@ class PongTrainer:
             print(f"GPU Memory allocated: {torch.cuda.memory_allocated() if torch.cuda.is_available() else 'N/A (MPS)'}")
             print("⚠️  For optimal GPU usage with vectorized training:")
             print("   - Use --num-envs that's a multiple of 16 (e.g., 32, 64, 96)")
-            print("   - Don't use --async-envs (incompatible with GPU)")
-            print("   - Ensure batch operations run on GPU (check activity monitor)")
         
         print("-" * 60)
         
@@ -348,6 +445,13 @@ class PongTrainer:
             self.losses.append(stats['loss'])
             self.scores_left.append(stats['score_left'])
             self.scores_right.append(stats['score_right'])
+
+            # Keep reward breakdown history for logging (single or vectorized)
+            self.reward_breakdowns.append(stats.get('reward_breakdown'))
+            self.reward_signals.append({
+                'pos': stats.get('pos_reward', 0.0),
+                'neg': stats.get('neg_reward', 0.0)
+            })
             
             # Store action distribution for logging
             if 'action_dist' in stats:
@@ -444,6 +548,71 @@ class PongTrainer:
               f"Epsilon: {self.agent.get_epsilon():.3f} | "
               f"Speed: {actual_eps_per_sec:.2f} eps/s{mem_info} | "
               f"Buffer: {len(self.agent.memory)}")
+        # Show reward/penalty distribution for recent episodes using raw reward mass
+        signal_window = self.reward_signals[-n:]
+        total_pos = sum(s.get('pos', 0.0) for s in signal_window)
+        total_neg = sum(s.get('neg', 0.0) for s in signal_window)
+        total_mass = total_pos + total_neg
+
+        if total_mass == 0:
+            print("  └─> Reward mix: total=0 (no signal in window)")
+        else:
+            pos_pct = 100.0 * total_pos / total_mass
+            neg_pct = 100.0 * total_neg / total_mass
+            print(
+                "  └─> Reward mix ± (last {0} eps): positive={1:.1f}% ({2:.1f}), penalty={3:.1f}% ({4:.1f})".format(
+                    n,
+                    pos_pct,
+                    total_pos,
+                    neg_pct,
+                    total_neg,
+                )
+            )
+
+        # Optional: detailed category breakdown if available (percent within positive and within penalty)
+        breakdown_window = self.reward_breakdowns[-n:]
+        pos_by_key = None
+        neg_by_key = None
+        for rb in breakdown_window:
+            if isinstance(rb, dict):
+                if pos_by_key is None:
+                    pos_by_key = {k: 0.0 for k in rb.keys()}
+                    neg_by_key = {k: 0.0 for k in rb.keys()}
+                for k, v in rb.items():
+                    if v is None:
+                        continue
+                    if v > 0:
+                        pos_by_key[k] += float(v)
+                    elif v < 0:
+                        neg_by_key[k] += float(-v)
+        if pos_by_key and neg_by_key:
+            tot_pos = sum(pos_by_key.values())
+            tot_neg = sum(neg_by_key.values())
+
+            if tot_pos > 0:
+                print(
+                    "  └─> Positive sources (within + only, last {0} eps): hit={1:.1f}%, score={2:.1f}%, prox={3:.1f}%".format(
+                        n,
+                        100.0 * pos_by_key.get('hit_ball', 0.0) / tot_pos,
+                        100.0 * pos_by_key.get('score_point', 0.0) / tot_pos,
+                        100.0 * pos_by_key.get('proximity', 0.0) / tot_pos,
+                    )
+                )
+            else:
+                print(f"  └─> Positive sources (last {n} eps): none")
+
+            if tot_neg > 0:
+                print(
+                    "  └─> Penalty sources (within - only, last {0} eps): lose={1:.1f}%, miss={2:.1f}%, far={3:.1f}%, neutral={4:.1f}%".format(
+                        n,
+                        100.0 * neg_by_key.get('lose_point', 0.0) / tot_neg,
+                        100.0 * neg_by_key.get('miss_ball', 0.0) / tot_neg,
+                        100.0 * neg_by_key.get('far_penalty', 0.0) / tot_neg,
+                        100.0 * neg_by_key.get('neutral', 0.0) / tot_neg,
+                    )
+                )
+            else:
+                print(f"  └─> Penalty sources (last {n} eps): none")
     
     def _cleanup_memory(self):
         """
@@ -497,8 +666,24 @@ def main():
                        help='Number of frames to repeat each action (1=no skip, 4=4x faster, default=4)')
     parser.add_argument('--resume', type=str, default=None,
                        help='Path to checkpoint to resume from')
+    parser.add_argument('--fresh-start', action='store_true',
+                       help='Ignore existing model and start from scratch (disables auto-resume)')
     
     args = parser.parse_args()
+
+    # Determine resume path: default to existing base model unless user opts out
+    resume_path = None
+    if args.fresh_start:
+        if args.resume:
+            print('Warning: --fresh-start set, ignoring --resume path')
+    else:
+        candidate = args.resume or MODEL_SAVE_PATH
+        if candidate and os.path.exists(candidate):
+            resume_path = candidate
+            if args.resume is None and candidate == MODEL_SAVE_PATH:
+                print(f'Auto-resuming from default model at {candidate}')
+        elif args.resume:
+            print(f'Warning: resume path {candidate} not found, starting fresh')
     
     # Create trainer
     trainer = PongTrainer(
@@ -513,7 +698,7 @@ def main():
     )
     
     # Start training
-    trainer.train(resume_from=args.resume)
+    trainer.train(resume_from=resume_path)
 
 
 if __name__ == "__main__":

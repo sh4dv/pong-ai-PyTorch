@@ -69,7 +69,8 @@ class DQNAgent:
         
         # Optimizer and loss function
         self.optimizer = optim.Adam(self.policy_net.parameters(), lr=learning_rate)
-        self.criterion = nn.MSELoss()
+        # Huber loss is more robust to occasional outliers than MSE
+        self.criterion = nn.SmoothL1Loss()
         
         # Replay buffer
         self.memory = ReplayBuffer(memory_size)
@@ -175,6 +176,14 @@ class DQNAgent:
         
         # Sample batch from replay buffer
         states, actions, rewards, next_states, dones = self.memory.sample(batch_size)
+
+        # Guard against NaN/Inf coming from the environment or replay buffer
+        if not np.isfinite(states).all() or not np.isfinite(next_states).all() or not np.isfinite(rewards).all():
+            print("⚠️  Warning: Non-finite values in batch, skipping")
+            return 0.0
+
+        # Clip extreme rewards to keep targets bounded (manual play rewards are smaller)
+        rewards = np.clip(rewards, -20.0, 50.0)
         
         # Convert to tensors and move to device (non_blocking for speed)
         states = torch.FloatTensor(states).to(self.device, non_blocking=True)
@@ -183,9 +192,6 @@ class DQNAgent:
         next_states = torch.FloatTensor(next_states).to(self.device, non_blocking=True)
         dones = torch.FloatTensor(dones).to(self.device, non_blocking=True)
         
-        # Clip rewards to prevent extreme Q values
-        rewards = torch.clamp(rewards, -2.0, 2.0)
-        
         # Compute current Q values
         current_q_values = self.policy_net(states).gather(1, actions.unsqueeze(1)).squeeze(1)
         
@@ -193,9 +199,18 @@ class DQNAgent:
         with torch.no_grad():
             next_q_values = self.target_net(next_states).max(1)[0]
             target_q_values = rewards + (1 - dones) * self.gamma * next_q_values
-            # Clip target Q values to prevent explosion (smaller range for stability)
-            target_q_values = torch.clamp(target_q_values, -10.0, 10.0)
+            # Clamp targets to keep them in a sane numeric range
+            target_q_values = torch.clamp(target_q_values, -50.0, 50.0)
+            # Keep targets conservative to avoid exploding losses in online/manual play
         
+        # Clamp current Qs as well to reduce gradient spikes from rare outliers
+        current_q_values = torch.clamp(current_q_values, -50.0, 50.0)
+
+        # Replace any non-finite values before loss to prevent blowups
+        if not torch.isfinite(current_q_values).all() or not torch.isfinite(target_q_values).all():
+            print("⚠️  Warning: Non-finite Q values, skipping batch")
+            return 0.0
+
         # Compute loss
         loss = self.criterion(current_q_values, target_q_values)
         

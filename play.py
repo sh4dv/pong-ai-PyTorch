@@ -48,13 +48,17 @@ class PongPlayer:
         Returns:
             np.array: Normalized state
         """
+        # Keep the normalization identical to the training environment (PongEnv)
+        paddle1_center = (state[4] + PADDLE_HEIGHT / 2) / WINDOW_HEIGHT
+        paddle2_center = (state[5] + PADDLE_HEIGHT / 2) / WINDOW_HEIGHT
+
         normalized = np.array([
             state[0] / WINDOW_WIDTH,      # ball_x
             state[1] / WINDOW_HEIGHT,     # ball_y
-            (state[2] + 10) / 20,          # ball_vel_x (assumes range [-10, 10])
-            (state[3] + 10) / 20,          # ball_vel_y (assumes range [-10, 10])
-            state[4] / WINDOW_HEIGHT,     # paddle1_y
-            state[5] / WINDOW_HEIGHT,     # paddle2_y
+            (state[2] + 10) / 20,         # ball_vel_x (assumes range [-10, 10])
+            (state[3] + 10) / 20,         # ball_vel_y (assumes range [-10, 10])
+            paddle1_center,               # paddle1 center_y
+            paddle2_center,               # paddle2 center_y
         ], dtype=np.float32)
         
         return np.clip(normalized, 0.0, 1.0)
