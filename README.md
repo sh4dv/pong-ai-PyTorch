@@ -246,6 +246,6 @@ Adjust `FPS` in `config.py`
 
 MIT License
 
-## Author
+Author: sh4dv
 
 Created for reinforcement learning education and experimentation.
