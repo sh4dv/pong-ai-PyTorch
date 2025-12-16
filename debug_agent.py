@@ -48,7 +48,7 @@ def debug_agent(model_path, num_steps=1000, verbose=True):
     truncated = False
     
     print("Starting debug session...")
-    print("State format: [ball_x, ball_y, ball_vx, ball_vy, paddle1_y, paddle2_y]")
+    print("State format: [ball_x, ball_y, ball_vx, ball_vy, paddle1_y, paddle2_y, ball_speed_abs, ball_dist_to_paddle1]")
     print("-" * 80)
     
     while not (terminated or truncated) and step < num_steps:
@@ -70,7 +70,7 @@ def debug_agent(model_path, num_steps=1000, verbose=True):
         # Print detailed info every 50 steps or when stuck
         if verbose and (step % 50 == 0 or stuck_counter > 20):
             print(f"\nStep {step}:")
-            print(f"  State: ball=({state[0]:.0f}, {state[1]:.0f}) vel=({state[2]:.1f}, {state[3]:.1f}) paddle1_y={state[4]:.0f} paddle2_y={state[5]:.0f}")
+            print(f"  State: ball=({state[0]:.3f}, {state[1]:.3f}) vel=({state[2]:.3f}, {state[3]:.3f}) paddle1={state[4]:.3f} paddle2={state[5]:.3f} speed={state[6]:.3f} dist_to_p1={state[7]:.3f}")
             print(f"  Q-values: NONE={q_values[0]:.3f}, UP={q_values[1]:.3f}, DOWN={q_values[2]:.3f}")
             print(f"  Action: {action_names[action]} (max Q: {action_names[np.argmax(q_values)]})")
             print(f"  Paddle Y: {state[4]:.0f} (last: {last_paddle_y:.0f})")

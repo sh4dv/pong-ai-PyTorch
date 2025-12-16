@@ -13,6 +13,7 @@ from config import (
     OPPONENT_SPEED_MIN,
     OPPONENT_SPEED_MAX,
     BALL_SIZE,
+    BALL_MAX_SPEED,
     PADDLE_OFFSET,
     PADDLE_WIDTH,
     PADDLE_HEIGHT,
@@ -54,12 +55,14 @@ class PongEnv(gym.Env):
         # Define action and observation spaces
         self.action_space = spaces.Discrete(3)  # 0=none, 1=up, 2=down
         
-        # Observation space: [ball_x, ball_y, ball_vel_x, ball_vel_y, paddle1_y, paddle2_y]
+        # Observation space: [ball_x, ball_y, ball_vel_x, ball_vel_y,
+        #                     paddle1_center_y, paddle2_center_y,
+        #                     ball_speed_abs, ball_dist_to_paddle1]
         # All values are normalized to [0, 1] range
         self.observation_space = spaces.Box(
             low=0.0,
             high=1.0,
-            shape=(6,),
+            shape=(8,),
             dtype=np.float32
         )
         
@@ -85,6 +88,17 @@ class PongEnv(gym.Env):
         paddle1_center = (state[4] + PADDLE_HEIGHT / 2) / WINDOW_HEIGHT
         paddle2_center = (state[5] + PADDLE_HEIGHT / 2) / WINDOW_HEIGHT
 
+        # Absolute ball speed (magnitude) normalized by max possible speed
+        ball_speed = np.sqrt(state[2] * state[2] + state[3] * state[3])
+        max_speed = BALL_MAX_SPEED * np.sqrt(2)
+        ball_speed_norm = np.clip(ball_speed / max_speed, 0.0, 1.0)
+
+        # Vertical distance between ball center and left paddle center (abs)
+        ball_center = state[1] + BALL_SIZE / 2
+        paddle1_center_px = state[4] + PADDLE_HEIGHT / 2
+        dist_to_paddle1 = abs(ball_center - paddle1_center_px)
+        dist_to_paddle1_norm = np.clip(dist_to_paddle1 / WINDOW_HEIGHT, 0.0, 1.0)
+
         normalized = np.array([
             state[0] / WINDOW_WIDTH,      # ball_x
             state[1] / WINDOW_HEIGHT,     # ball_y
@@ -92,6 +106,8 @@ class PongEnv(gym.Env):
             (state[3] + 10) / 20,         # ball_vel_y (assumes range [-10, 10])
             paddle1_center,               # paddle1 center_y
             paddle2_center,               # paddle2 center_y
+            ball_speed_norm,              # abs(ball velocity) normalized
+            dist_to_paddle1_norm,         # abs(vertical distance to left paddle) normalized
         ], dtype=np.float32)
         
         return np.clip(normalized, 0.0, 1.0)
@@ -118,7 +134,16 @@ class PongEnv(gym.Env):
         self.game.set_paddle_speed(2, opp_speed)
         normalized_state = self._normalize_state(state)
         
-        info = {}
+        # Include ball info (normalized) in info dict so external agents/loggers
+        # can access ball position and velocity directly without parsing the obs
+        info = {
+            'ball_x': normalized_state[0],
+            'ball_y': normalized_state[1],
+            'ball_vel_x': normalized_state[2],
+            'ball_vel_y': normalized_state[3],
+            'ball_speed': normalized_state[6],
+            'ball_dist_to_paddle1': normalized_state[7],
+        }
         
         return normalized_state, info
     
@@ -171,10 +196,20 @@ class PongEnv(gym.Env):
         
         # Info
         score_left, score_right = self.game.get_scores()
+        # Add ball position & velocity (normalized) to info so that callers
+        # that rely on the info dict (logging, external AI modules) have
+        # easy access to those values.
+        # Add ball metrics to info (normalized) to help logging/debugging
         info = {
             'score_left': score_left,
             'score_right': score_right,
-            'reward_breakdown': reward_breakdown
+            'reward_breakdown': reward_breakdown,
+            'ball_x': normalized_state[0],
+            'ball_y': normalized_state[1],
+            'ball_vel_x': normalized_state[2],
+            'ball_vel_y': normalized_state[3],
+            'ball_speed': normalized_state[6],
+            'ball_dist_to_paddle1': normalized_state[7],
         }
         
         return normalized_state, total_reward, terminated, truncated, info
@@ -221,7 +256,7 @@ class PongEnv(gym.Env):
         if (self.game.ball_x <= PADDLE_OFFSET + PADDLE_WIDTH and
             self.game.paddle1_y <= self.game.ball_y <= self.game.paddle1_y + PADDLE_HEIGHT):
             self.game._handle_paddle_hit(1)
-            reward_left = REWARD_HIT_BALL
+            # Add hit reward (do not overwrite other contributions)
             reward_contrib['hit_ball'] += REWARD_HIT_BALL
         # Dense reward only when ball is coming toward the left paddle and still in front of it
         elif self.game.ball_vel_x < 0 and self.game.ball_x <= WINDOW_WIDTH * 0.75:
@@ -237,24 +272,22 @@ class PongEnv(gym.Env):
                 # Stronger shaping near the ball: reward rises quadratically as distance -> 0
                 tightness = 1 - distance / close_thresh
                 proximity_reward = REWARD_PROXIMITY * (tightness * tightness)
-                reward_left = proximity_reward
+                # Add proximity shaping instead of replacing reward
                 reward_contrib['proximity'] += proximity_reward
             elif distance >= far_thresh:
                 # Penalize when paddle stays far while the ball is coming in
                 span = max(far_thresh, 1.0)
                 scale = min(1.0, (distance - far_thresh) / span)
                 far_penalty = REWARD_FAR_PENALTY * (1.0 + scale)
-                reward_left = far_penalty
+                # Add far penalty as another contribution
                 reward_contrib['far_penalty'] += far_penalty
             else:
                 span = far_thresh - close_thresh
                 scale = (distance - close_thresh) / span
                 proximity_reward = REWARD_PROXIMITY * max(0.0, (1 - scale) * (1 - scale))
-                reward_left = proximity_reward
                 reward_contrib['proximity'] += proximity_reward
         else:
             reward_contrib['neutral'] += REWARD_NEUTRAL
-            reward_left = REWARD_NEUTRAL
         
         # Ball collision with right paddle
         if (self.game.ball_x >= WINDOW_WIDTH - PADDLE_OFFSET - PADDLE_WIDTH - BALL_SIZE and
@@ -266,30 +299,37 @@ class PongEnv(gym.Env):
         if self.game.ball_x < 0:
             # Right player scores - left paddle missed
             self.game.score2 += 1
+            # Left gets lose point penalty
             reward_contrib['lose_point'] += REWARD_LOSE_POINT
-            reward_left = REWARD_LOSE_POINT
-            reward_right = REWARD_SCORE_POINT
+            # Right only gets score reward if it participated in the rally
+            if getattr(self.game, 'right_hits_recent', 0) > 0:
+                reward_contrib['score_point'] += REWARD_SCORE_POINT
+                reward_right = REWARD_SCORE_POINT
+            else:
+                reward_right = 0.0
             # Additional penalty for missing when ball was in range
             if prev_ball_x > 0 and prev_ball_x < PADDLE_OFFSET + PADDLE_WIDTH + 50:
                 reward_contrib['miss_ball'] += REWARD_MISS_BALL
-                reward_left += REWARD_MISS_BALL
             self.game._reset_ball()
-            
+
             if self.game.score2 >= WINNING_SCORE:
                 self.game.done = True
         elif self.game.ball_x > WINDOW_WIDTH:
             # Left player scores
             self.game.score1 += 1
-            reward_contrib['score_point'] += REWARD_SCORE_POINT
-            reward_left = REWARD_SCORE_POINT
+            # Left only gets score reward if it participated in the rally
+            if getattr(self.game, 'left_hits_recent', 0) > 0:
+                reward_contrib['score_point'] += REWARD_SCORE_POINT
+            # Right gets lose point penalty
+            reward_contrib['lose_point'] += REWARD_LOSE_POINT
             reward_right = REWARD_LOSE_POINT
             self.game._reset_ball()
-            
+
             if self.game.score1 >= WINNING_SCORE:
                 self.game.done = True
         
         # The reward for the left player is the sum of the contributions recorded above
-        reward_left_total = sum(reward_contrib.values()) if reward_left == REWARD_NEUTRAL else reward_left
+        reward_left_total = sum(reward_contrib.values())
         return self.game._get_state(), reward_left_total, reward_right, self.game.done, reward_contrib
     
     def _simple_ai_action(self, state):

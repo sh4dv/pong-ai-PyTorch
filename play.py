@@ -52,13 +52,25 @@ class PongPlayer:
         paddle1_center = (state[4] + PADDLE_HEIGHT / 2) / WINDOW_HEIGHT
         paddle2_center = (state[5] + PADDLE_HEIGHT / 2) / WINDOW_HEIGHT
 
+        # Derive additional features consistent with training normalization
+        ball_speed = np.sqrt(state[2] * state[2] + state[3] * state[3])
+        max_speed = BALL_MAX_SPEED * np.sqrt(2)
+        ball_speed_norm = np.clip(ball_speed / max_speed, 0.0, 1.0)
+
+        ball_center = state[1] + BALL_SIZE / 2
+        paddle1_center_px = state[4] + PADDLE_HEIGHT / 2
+        dist_to_paddle1 = abs(ball_center - paddle1_center_px)
+        dist_to_paddle1_norm = np.clip(dist_to_paddle1 / WINDOW_HEIGHT, 0.0, 1.0)
+
         normalized = np.array([
             state[0] / WINDOW_WIDTH,      # ball_x
             state[1] / WINDOW_HEIGHT,     # ball_y
             (state[2] + 10) / 20,         # ball_vel_x (assumes range [-10, 10])
             (state[3] + 10) / 20,         # ball_vel_y (assumes range [-10, 10])
             paddle1_center,               # paddle1 center_y
-            paddle2_center,               # paddle2 center_y
+            paddle2_center,               # paddle2 center_y,
+            ball_speed_norm,              # abs(ball velocity) normalized
+            dist_to_paddle1_norm,         # abs(vertical distance to left paddle) normalized
         ], dtype=np.float32)
         
         return np.clip(normalized, 0.0, 1.0)

@@ -135,17 +135,17 @@ All hyperparameters can be adjusted in `config.py`:
 - `TARGET_UPDATE = 10` - Target network update frequency
 
 ### Network Architecture
-- `INPUT_SIZE = 6` - State vector size
-- `HIDDEN_SIZE_1 = 128` - First hidden layer
-- `HIDDEN_SIZE_2 = 128` - Second hidden layer
+- `INPUT_SIZE = 8` - State vector size
+- `HIDDEN_SIZE_1 = 256` - First hidden layer
+- `HIDDEN_SIZE_2 = 256` - Second hidden layer
 - `OUTPUT_SIZE = 3` - Number of actions
 
 ## How It Works
 
 ### State Representation
-The agent observes the game state as a 6-dimensional vector:
+The agent observes the game state as an 8-dimensional vector:
 ```python
-[ball_x, ball_y, ball_vel_x, ball_vel_y, paddle1_y, paddle2_y]
+[ball_x, ball_y, ball_vel_x, ball_vel_y, paddle1_center_y, paddle2_center_y, ball_speed_abs, ball_dist_to_paddle1]
 ```
 
 ### Action Space

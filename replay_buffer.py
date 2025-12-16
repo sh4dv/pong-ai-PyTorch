@@ -36,6 +36,19 @@ class ReplayBuffer:
             next_state (np.array): Next state
             done (bool): Whether episode ended
         """
+        # Guard against storing non-finite values which later poison training
+        try:
+            s = np.array(state, dtype=np.float32)
+            ns = np.array(next_state, dtype=np.float32)
+            r = float(reward)
+            if not (np.isfinite(s).all() and np.isfinite(ns).all() and np.isfinite(r)):
+                print("⚠️  Warning: Attempt to store non-finite transition, skipping")
+                return
+        except Exception:
+            # In case of unexpected types, skip the entry rather than crash
+            print("⚠️  Warning: Invalid transition format, skipping")
+            return
+
         self.buffer.append((state, action, reward, next_state, done))
     
     def sample(self, batch_size):

@@ -208,7 +208,84 @@ class DQNAgent:
 
         # Replace any non-finite values before loss to prevent blowups
         if not torch.isfinite(current_q_values).all() or not torch.isfinite(target_q_values).all():
+            # Detailed diagnostics for debugging NaN/Inf issues
             print("⚠️  Warning: Non-finite Q values, skipping batch")
+            try:
+                import time
+                ts = int(time.time())
+                # Summaries (use nan-aware ops)
+                try:
+                    curr_min = torch.nanmin(current_q_values).item()
+                    curr_max = torch.nanmax(current_q_values).item()
+                    curr_mean = torch.nanmean(current_q_values).item()
+                except Exception:
+                    curr_min = curr_max = curr_mean = float('nan')
+
+                try:
+                    targ_min = torch.nanmin(target_q_values).item()
+                    targ_max = torch.nanmax(target_q_values).item()
+                    targ_mean = torch.nanmean(target_q_values).item()
+                except Exception:
+                    targ_min = targ_max = targ_mean = float('nan')
+
+                print(f"  current_q -> min={curr_min}, max={curr_max}, mean={curr_mean}")
+                print(f"  target_q  -> min={targ_min}, max={targ_max}, mean={targ_mean}")
+
+                # Show indices of first few non-finite entries
+                nonfin_curr_idx = torch.where(~torch.isfinite(current_q_values))[0][:10].cpu().numpy()
+                nonfin_targ_idx = torch.where(~torch.isfinite(target_q_values))[0][:10].cpu().numpy()
+                print(f"  non-finite current_q indices (up to 10): {nonfin_curr_idx}")
+                print(f"  non-finite target_q indices  (up to 10): {nonfin_targ_idx}")
+
+                # Save offending batch and a small snapshot of model/optimizer for offline inspection
+                debug_path = os.path.join("models", f"debug_nonfinite_batch_{ts}.npz")
+                try:
+                    np.savez_compressed(
+                        debug_path,
+                        states=states.detach().cpu().numpy(),
+                        actions=actions.detach().cpu().numpy(),
+                        rewards=rewards.detach().cpu().numpy(),
+                        next_states=next_states.detach().cpu().numpy(),
+                        dones=dones.detach().cpu().numpy(),
+                        current_q=current_q_values.detach().cpu().numpy(),
+                        target_q=target_q_values.detach().cpu().numpy(),
+                    )
+                    print(f"  Debug batch saved to {debug_path}")
+                except Exception as e:
+                    print(f"  Failed to save debug batch: {e}")
+
+                # Check model parameters for NaN/Inf
+                def inspect_params(net, name):
+                    bad = []
+                    for n, p in net.named_parameters():
+                        if not torch.isfinite(p).all():
+                            bad.append(n)
+                    if bad:
+                        print(f"  {name} has non-finite params: {bad}")
+                    else:
+                        # Print parameter norms for quick sanity checking
+                        total_norm = 0.0
+                        for p in net.parameters():
+                            total_norm += float(torch.norm(p).item())
+                        print(f"  {name} parameter norm (sum of L2 norms): {total_norm:.3f}")
+
+                inspect_params(self.policy_net, "policy_net")
+                inspect_params(self.target_net, "target_net")
+
+                # Inspect optimizer state (e.g. Adam running averages)
+                try:
+                    bad_opt = False
+                    for sk, sv in self.optimizer.state.items():
+                        for k, v in sv.items():
+                            if isinstance(v, torch.Tensor):
+                                if not torch.isfinite(v).all():
+                                    bad_opt = True
+                    print(f"  Optimizer state contains non-finite tensors: {bad_opt}")
+                except Exception:
+                    print("  Failed to inspect optimizer state")
+            except Exception as e:
+                print(f"  Diagnostic logging failed: {e}")
+
             return 0.0
 
         # Compute loss
@@ -237,6 +314,29 @@ class DQNAgent:
         if not np.isfinite(loss_value):
             print(f"⚠️  Warning: Loss is {loss_value} after training, returning 0")
             loss_value = 0.0
+
+        # Quick post-step sanity check: ensure parameters are finite
+        try:
+            any_bad = False
+            for p in self.policy_net.parameters():
+                if not torch.isfinite(p).all():
+                    any_bad = True
+                    break
+            if any_bad:
+                ts = int(__import__('time').time())
+                snapshot = os.path.join("models", f"nan_params_snapshot_{ts}.pth")
+                torch.save(self.policy_net.state_dict(), snapshot)
+                print(f"⚠️  Non-finite parameters detected; model snapshot saved to {snapshot}. Resetting optimizer state.")
+                # reset optimizer state to avoid perpetuating NaNs in running averages
+                try:
+                    self.optimizer.state = {}
+                except Exception:
+                    pass
+                # Return early - this batch is not reliable
+                return 0.0
+        except Exception:
+            # Non-fatal: keep running but inform
+            print("⚠️  Warning: Failed post-step parameter sanity check")
         
         del loss, current_q_values, target_q_values, next_q_values
         

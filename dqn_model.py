@@ -14,7 +14,9 @@ class DQN(nn.Module):
     Deep Q-Network with 2 hidden layers.
     
     Architecture:
-        Input Layer:  6 neurons (state: ball_x, ball_y, ball_vel_x, ball_vel_y, paddle1_y, paddle2_y)
+    Input Layer:  8 neurons (state: ball_x, ball_y, ball_vel_x, ball_vel_y,
+                  paddle1_center_y, paddle2_center_y,
+                  ball_speed_abs, ball_dist_to_paddle1)
         Hidden Layer 1: 128 neurons with ReLU activation
         Hidden Layer 2: 128 neurons with ReLU activation
         Output Layer: 3 neurons (Q-values for actions: none, up, down)

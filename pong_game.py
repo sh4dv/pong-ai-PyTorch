@@ -52,6 +52,9 @@ class PongGame:
         
         # Game state
         self.done = False
+        # Track recent hits per rally to prevent rewarding lucky early scores
+        self.left_hits_recent = 0
+        self.right_hits_recent = 0
         
         return self._get_state()
     
@@ -113,7 +116,8 @@ class PongGame:
         if (self.ball_x <= PADDLE_OFFSET + PADDLE_WIDTH and
             self.paddle1_y <= self.ball_y <= self.paddle1_y + PADDLE_HEIGHT):
             self._handle_paddle_hit(1)
-            reward_left = REWARD_HIT_BALL
+            # Add hit reward (do not replace other contributions)
+            reward_left += REWARD_HIT_BALL
             paddle_hit_left = True
         # Dense reward: proximity to ball for left paddle (only when ball approaching and not hit)
         elif self.ball_x < WINDOW_WIDTH / 2 and self.ball_vel_x < 0:
@@ -123,20 +127,23 @@ class PongGame:
             max_distance = WINDOW_HEIGHT
             # Normalize distance and apply small reward
             proximity_reward = REWARD_PROXIMITY * max(0, 1 - distance / max_distance)
-            reward_left = proximity_reward  # Replace, don't add
+            # Add proximity shaping instead of replacing
+            reward_left += proximity_reward
         
         # Ball collision with right paddle
         if (self.ball_x >= WINDOW_WIDTH - PADDLE_OFFSET - PADDLE_WIDTH - BALL_SIZE and
             self.paddle2_y <= self.ball_y <= self.paddle2_y + PADDLE_HEIGHT):
             self._handle_paddle_hit(2)
-            reward_right = REWARD_HIT_BALL
+            reward_right += REWARD_HIT_BALL
         
         # Check if ball went out of bounds (scoring)
         if self.ball_x < 0:
             # Right player scores - left paddle missed
             self.score2 += 1
-            reward_right = REWARD_SCORE_POINT
-            reward_left = REWARD_LOSE_POINT
+            # Award score to right only if it participated in the rally
+            if getattr(self, 'right_hits_recent', 0) > 0:
+                reward_right += REWARD_SCORE_POINT
+            reward_left += REWARD_LOSE_POINT
             # Additional penalty for missing when ball was in range
             if prev_ball_x > 0 and prev_ball_x < PADDLE_OFFSET + PADDLE_WIDTH + 50:
                 reward_left += REWARD_MISS_BALL
@@ -148,8 +155,10 @@ class PongGame:
         elif self.ball_x > WINDOW_WIDTH:
             # Left player scores
             self.score1 += 1
-            reward_left = REWARD_SCORE_POINT
-            reward_right = REWARD_LOSE_POINT
+            # Award score to left only if it participated in the rally
+            if getattr(self, 'left_hits_recent', 0) > 0:
+                reward_left += REWARD_SCORE_POINT
+            reward_right += REWARD_LOSE_POINT
             self._reset_ball()
             
             if self.score1 >= WINNING_SCORE:
@@ -218,12 +227,26 @@ class PongGame:
         # Slightly increase horizontal speed
         if abs(self.ball_vel_x) < BALL_MAX_SPEED:
             self.ball_vel_x *= 1.05
+        # Track that this paddle participated in the current rally
+        if paddle_num == 1:
+            try:
+                self.left_hits_recent += 1
+            except AttributeError:
+                self.left_hits_recent = 1
+        else:
+            try:
+                self.right_hits_recent += 1
+            except AttributeError:
+                self.right_hits_recent = 1
     
     def _reset_ball(self):
         """Reset ball to center with random direction."""
         self.ball_x = WINDOW_WIDTH // 2
         self.ball_y = WINDOW_HEIGHT // 2
         self.ball_vel_x, self.ball_vel_y = self._random_launch_velocity()
+        # Reset per-rally participation counters
+        self.left_hits_recent = 0
+        self.right_hits_recent = 0
 
     def _random_launch_velocity(self):
         angle = np.deg2rad(np.random.uniform(LAUNCH_ANGLE_MIN_DEG, LAUNCH_ANGLE_MAX_DEG))
