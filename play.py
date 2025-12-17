@@ -59,8 +59,8 @@ class PongPlayer:
 
         ball_center = state[1] + BALL_SIZE / 2
         paddle1_center_px = state[4] + PADDLE_HEIGHT / 2
-        dist_to_paddle1 = abs(ball_center - paddle1_center_px)
-        dist_to_paddle1_norm = np.clip(dist_to_paddle1 / WINDOW_HEIGHT, 0.0, 1.0)
+        # Signed offset normalized to roughly [-1, 1] (positive => ball below paddle)
+        signed_offset = np.clip((ball_center - paddle1_center_px) / (WINDOW_HEIGHT / 2.0), -1.0, 1.0)
 
         normalized = np.array([
             state[0] / WINDOW_WIDTH,      # ball_x
@@ -70,10 +70,13 @@ class PongPlayer:
             paddle1_center,               # paddle1 center_y
             paddle2_center,               # paddle2 center_y,
             ball_speed_norm,              # abs(ball velocity) normalized
-            dist_to_paddle1_norm,         # abs(vertical distance to left paddle) normalized
+            signed_offset,                # signed vertical offset: ball relative to left paddle ([-1,1])
         ], dtype=np.float32)
-        
-        return np.clip(normalized, 0.0, 1.0)
+
+        # Clip first 7 features to [0,1] and preserve signed offset in [-1,1]
+        normalized[:7] = np.clip(normalized[:7], 0.0, 1.0)
+        normalized[7] = np.clip(normalized[7], -1.0, 1.0)
+        return normalized
         
     def play(self, num_games=None):
         """

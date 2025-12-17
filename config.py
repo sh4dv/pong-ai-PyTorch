@@ -38,20 +38,23 @@ GRAY = (128, 128, 128)
 # ============================================================================
 
 # Reward values
-REWARD_HIT_BALL = 5.0       # Reward for hitting the ball with paddle (strong positive signal)
-REWARD_SCORE_POINT = 10.0   # DISABLED FOR NOW | Reward for scoring a point (main objective!)
+REWARD_HIT_BALL = 12.0       # Reward for hitting the ball with paddle (strong positive signal)
+REWARD_SCORE_POINT = 8.0   # DISABLED FOR NOW | Reward for scoring a point (main objective!)
 REWARD_LOSE_POINT = 0.0   # DISABLED FOR NOW | Penalty for opponent scoring (strong penalty)
-REWARD_NEUTRAL = -0.01     # Tiny step cost to discourage doing nothing (penalize stalling)
-REWARD_PROXIMITY = 1.0      # Reward shaping to pull paddle toward incoming ball (increased)
+# Slightly stronger step penalty to discourage idling
+REWARD_NEUTRAL = -0.00     # Tiny step cost to discourage doing nothing (penalize stalling)
+# Increase proximity shaping so paddle is more strongly pulled toward incoming ball
+REWARD_PROXIMITY = 1.5      # Reward shaping to pull paddle toward incoming ball
 REWARD_MISS_BALL = -5.0     # Penalty when ball passes by paddle (strong penalty)
-REWARD_FAR_PENALTY = -0.10   # Softer penalty when far from ball (increased magnitude)
+# Make far penalty stronger (more negative) to discourage sitting far from incoming ball
+REWARD_FAR_PENALTY = -0.2   # Stronger penalty when far from ball
 
 # DQN Hyperparameters
 LEARNING_RATE = 0.0001       # Learning rate (increased to escape local minimum)
 GAMMA = 0.99                # Discount factor for future rewards
 EPSILON_START = 0.9         # Starting epsilon for epsilon-greedy (slightly lower to favor early policy)
 EPSILON_END = 0.02           # Minimum epsilon value (reduce final exploration)
-EPSILON_DECAY = 0.999       # Epsilon decay rate per episode (faster decay to exploit learned policy)
+EPSILON_DECAY = 0.997       # Epsilon decay rate per episode (faster decay to exploit learned policy)
 BATCH_SIZE = 128            # Batch size for training (larger for better GPU utilization)
 MEMORY_SIZE = 100_000         # Replay buffer capacity (reduce to save RAM)
 TARGET_UPDATE = 5           # Update target network every N episodes (frequent updates)

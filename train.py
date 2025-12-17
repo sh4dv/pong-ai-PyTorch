@@ -433,8 +433,6 @@ class PongTrainer:
         print("-" * 60)
         
         start_time = time.time()
-        # Print an overall final summary with averages across the whole training run
-        self._print_final_summary(start_time, episodes_to_run)
         
         # Adjust episode count for vectorized training
         # Each "episode" now represents num_envs actual episodes
@@ -488,6 +486,8 @@ class PongTrainer:
         
         # Save final model
         self.agent.save(MODEL_SAVE_PATH)
+        # Print overall final summary after training completed
+        self._print_final_summary(start_time, episodes_to_run)
         
         # Print final statistics
         print("\n" + "=" * 60)

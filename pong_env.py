@@ -57,12 +57,14 @@ class PongEnv(gym.Env):
         
         # Observation space: [ball_x, ball_y, ball_vel_x, ball_vel_y,
         #                     paddle1_center_y, paddle2_center_y,
-        #                     ball_speed_abs, ball_dist_to_paddle1]
-        # All values are normalized to [0, 1] range
+        #                     ball_speed_abs, ball_rel_vert]
+        # Note: last element is a signed vertical offset (ball_center - paddle1_center)
+        # normalized to approximately [-1, 1]. The other values remain in [0,1].
+        low = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -1.0], dtype=np.float32)
+        high = np.array([1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0], dtype=np.float32)
         self.observation_space = spaces.Box(
-            low=0.0,
-            high=1.0,
-            shape=(8,),
+            low=low,
+            high=high,
             dtype=np.float32
         )
         
@@ -93,11 +95,14 @@ class PongEnv(gym.Env):
         max_speed = BALL_MAX_SPEED * np.sqrt(2)
         ball_speed_norm = np.clip(ball_speed / max_speed, 0.0, 1.0)
 
-        # Vertical distance between ball center and left paddle center (abs)
+        # Vertical ball center and paddle center
         ball_center = state[1] + BALL_SIZE / 2
         paddle1_center_px = state[4] + PADDLE_HEIGHT / 2
+        # Absolute vertical distance (for logging) and signed relative offset (for observation)
         dist_to_paddle1 = abs(ball_center - paddle1_center_px)
         dist_to_paddle1_norm = np.clip(dist_to_paddle1 / WINDOW_HEIGHT, 0.0, 1.0)
+        # Signed offset normalized to roughly [-1, 1] (positive => ball below paddle)
+        signed_offset = np.clip((ball_center - paddle1_center_px) / (WINDOW_HEIGHT / 2.0), -1.0, 1.0)
 
         normalized = np.array([
             state[0] / WINDOW_WIDTH,      # ball_x
@@ -107,10 +112,17 @@ class PongEnv(gym.Env):
             paddle1_center,               # paddle1 center_y
             paddle2_center,               # paddle2 center_y
             ball_speed_norm,              # abs(ball velocity) normalized
-            dist_to_paddle1_norm,         # abs(vertical distance to left paddle) normalized
+            signed_offset,                # signed vertical offset: ball relative to left paddle ([-1,1])
         ], dtype=np.float32)
-        
-        return np.clip(normalized, 0.0, 1.0)
+        # Clip each element to its intended range. The first 7 elements are in [0,1]
+        # while the last element is a signed offset in [-1,1]. Previously the
+        # whole vector was clipped to [0,1], which removed the sign information
+        # from the offset and could cause the agent to behave poorly (e.g. stay
+        # at extremes). Preserve the signed offset here.
+        normalized[:7] = np.clip(normalized[:7], 0.0, 1.0)
+        normalized[7] = np.clip(normalized[7], -1.0, 1.0)
+
+        return normalized
     
     def reset(self, seed=None, options=None):
         """
@@ -136,13 +148,20 @@ class PongEnv(gym.Env):
         
         # Include ball info (normalized) in info dict so external agents/loggers
         # can access ball position and velocity directly without parsing the obs
+        # compute absolute normalized distance for info (keep logging consistent)
+        ball_center = state[1] + BALL_SIZE / 2
+        paddle1_center_px = state[4] + PADDLE_HEIGHT / 2
+        dist_to_paddle1 = abs(ball_center - paddle1_center_px)
+        dist_to_paddle1_norm = np.clip(dist_to_paddle1 / WINDOW_HEIGHT, 0.0, 1.0)
+
         info = {
             'ball_x': normalized_state[0],
             'ball_y': normalized_state[1],
             'ball_vel_x': normalized_state[2],
             'ball_vel_y': normalized_state[3],
             'ball_speed': normalized_state[6],
-            'ball_dist_to_paddle1': normalized_state[7],
+            # Keep absolute distance in info for logging/debugging
+            'ball_dist_to_paddle1': dist_to_paddle1_norm,
         }
         
         return normalized_state, info
@@ -208,6 +227,12 @@ class PongEnv(gym.Env):
         # that rely on the info dict (logging, external AI modules) have
         # easy access to those values.
         # Add ball metrics to info (normalized) to help logging/debugging
+        # compute absolute normalized distance for logging
+        ball_center = next_state[1] + BALL_SIZE / 2
+        paddle1_center_px = next_state[4] + PADDLE_HEIGHT / 2
+        dist_to_paddle1 = abs(ball_center - paddle1_center_px)
+        dist_to_paddle1_norm = np.clip(dist_to_paddle1 / WINDOW_HEIGHT, 0.0, 1.0)
+
         info = {
             'score_left': score_left,
             'score_right': score_right,
@@ -217,7 +242,7 @@ class PongEnv(gym.Env):
             'ball_vel_x': normalized_state[2],
             'ball_vel_y': normalized_state[3],
             'ball_speed': normalized_state[6],
-            'ball_dist_to_paddle1': normalized_state[7],
+            'ball_dist_to_paddle1': dist_to_paddle1_norm,
         }
         
         return normalized_state, total_reward, terminated, truncated, info
@@ -266,8 +291,14 @@ class PongEnv(gym.Env):
             self.game._handle_paddle_hit(1)
             # Add hit reward (do not overwrite other contributions)
             reward_contrib['hit_ball'] += REWARD_HIT_BALL
-        # Dense reward only when ball is coming toward the left paddle and still in front of it
-        elif self.game.ball_vel_x < 0 and self.game.ball_x <= WINDOW_WIDTH * 0.75:
+        # Dense reward only when ball is coming toward the left paddle and still in front of it.
+        # Conservative change: do NOT apply the "far" penalty when the ball is already
+        # very close horizontally to the paddle (within ~1 ball diameter). This avoids
+        # penalizing the agent in the frames immediately before a possible hit due to
+        # small vertical misalignments or frame-skip timing.
+        elif (self.game.ball_vel_x < 0 and
+              self.game.ball_x <= WINDOW_WIDTH * 0.75 and
+              self.game.ball_x > (PADDLE_OFFSET + PADDLE_WIDTH + BALL_SIZE)):
             paddle1_center = self.game.paddle1_y + PADDLE_HEIGHT / 2
             ball_center = self.game.ball_y + BALL_SIZE / 2
             distance = abs(paddle1_center - ball_center)
@@ -289,6 +320,15 @@ class PongEnv(gym.Env):
                 far_penalty = REWARD_FAR_PENALTY * (1.0 + scale)
                 # Add far penalty as another contribution
                 reward_contrib['far_penalty'] += far_penalty
+                # Extra small penalty if paddle is hugging the top/bottom edge while
+                # the ball is incoming and far away. This discourages the agent from
+                # camping at extremes instead of moving toward the ball.
+                paddle_center = paddle1_center
+                edge_margin = PADDLE_HEIGHT * 0.15
+                if paddle_center <= edge_margin or paddle_center >= (WINDOW_HEIGHT - edge_margin):
+                    # Conservative extra penalty (tunable)
+                    edge_pen = -0.5 * abs(REWARD_FAR_PENALTY)
+                    reward_contrib['far_penalty'] += edge_pen
             else:
                 span = far_thresh - close_thresh
                 scale = (distance - close_thresh) / span
