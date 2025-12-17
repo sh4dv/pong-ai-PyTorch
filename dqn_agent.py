@@ -9,7 +9,8 @@ import torch.nn as nn
 import torch.optim as optim
 import numpy as np
 from dqn_model import DQN
-from replay_buffer import ReplayBuffer
+from replay_buffer import ReplayBuffer, PrioritizedReplayBuffer
+import config
 from config import *
 
 
@@ -72,8 +73,18 @@ class DQNAgent:
         # Huber loss is more robust to occasional outliers than MSE
         self.criterion = nn.SmoothL1Loss()
         
-        # Replay buffer
-        self.memory = ReplayBuffer(memory_size)
+        # Replay buffer (can be prioritized) — consult config at runtime so CLI overrides work
+        self.use_prioritized = getattr(config, 'USE_PRIORITIZED_REPLAY', USE_PRIORITIZED_REPLAY)
+        if self.use_prioritized:
+            self.memory = PrioritizedReplayBuffer(memory_size)
+            print("Using prioritized replay buffer")
+        else:
+            self.memory = ReplayBuffer(memory_size)
+
+        # N-step returns
+        self.n_step = getattr(config, 'N_STEP', 1)
+        from collections import defaultdict, deque
+        self._nstep_buffers = defaultdict(lambda: deque())
         
         # Training statistics
         self.training_step = 0
@@ -158,7 +169,50 @@ class DQNAgent:
             next_state (np.array): Next state
             done (bool): Whether episode ended
         """
-        self.memory.add(state, action, reward, next_state, done)
+        # Support N-step returns. For vectorized envs we will pass env_idx via
+        # train loop; if caller doesn't provide, default to env 0.
+        return self._store_transition_internal(state, action, reward, next_state, done, env_idx=0)
+
+    def _store_transition_internal(self, state, action, reward, next_state, done, env_idx=0):
+        """Internal transition handler with optional N-step aggregation."""
+        if self.n_step <= 1:
+            self.memory.add(state, action, reward, next_state, done)
+            return
+
+        buf = self._nstep_buffers[env_idx]
+        buf.append((state, action, reward, next_state, done))
+
+        # If we have enough steps, or episode ended, flush one aggregated transition
+        if len(buf) >= self.n_step or done:
+            # compute n-step return for the oldest element
+            R = 0.0
+            gamma = self.gamma
+            next_s = None
+            done_flag = False
+            for idx, (_s, _a, _r, _ns, _d) in enumerate(buf):
+                R += (_r) * (gamma ** idx)
+                next_s = _ns
+                done_flag = _d
+
+            s0, a0, _, _, _ = buf[0]
+            # add aggregated transition
+            self.memory.add(s0, a0, R, next_s, done_flag)
+
+            # pop left (slide window) and if done then flush remaining
+            buf.popleft()
+            if done:
+                # flush remaining shortened sequences
+                while buf:
+                    R = 0.0
+                    next_s = None
+                    done_flag = False
+                    for idx, (_s, _a, _r, _ns, _d) in enumerate(buf):
+                        R += (_r) * (gamma ** idx)
+                        next_s = _ns
+                        done_flag = _d
+                    s0, a0, _, _, _ = buf[0]
+                    self.memory.add(s0, a0, R, next_s, done_flag)
+                    buf.popleft()
     
     def train(self, batch_size=BATCH_SIZE):
         """
@@ -173,9 +227,15 @@ class DQNAgent:
         # Check if we have enough samples
         if not self.memory.is_ready(batch_size):
             return None
-        
-        # Sample batch from replay buffer
-        states, actions, rewards, next_states, dones = self.memory.sample(batch_size)
+
+        # Sample batch from replay buffer (with optional importance-sampling)
+        if self.use_prioritized:
+            states, actions, rewards, next_states, dones, indices, weights = self.memory.sample(batch_size)
+            weights = torch.FloatTensor(weights).to(self.device)
+        else:
+            states, actions, rewards, next_states, dones = self.memory.sample(batch_size)
+            indices = None
+            weights = torch.ones(batch_size, dtype=torch.float32).to(self.device)
 
         # Guard against NaN/Inf coming from the environment or replay buffer
         if not np.isfinite(states).all() or not np.isfinite(next_states).all() or not np.isfinite(rewards).all():
@@ -191,14 +251,35 @@ class DQNAgent:
         rewards = torch.FloatTensor(rewards).to(self.device, non_blocking=True)
         next_states = torch.FloatTensor(next_states).to(self.device, non_blocking=True)
         dones = torch.FloatTensor(dones).to(self.device, non_blocking=True)
+
+        # Clamp states/next_states to reasonable range to avoid numeric explosions
+        states = torch.clamp(states, -10.0, 10.0)
+        next_states = torch.clamp(next_states, -10.0, 10.0)
         
         # Compute current Q values
         current_q_values = self.policy_net(states).gather(1, actions.unsqueeze(1)).squeeze(1)
         
         # Compute target Q values using target network
         with torch.no_grad():
+            # Sanitize next_states: zero rows with any non-finite entries and clip to reasonable range
+            if not torch.isfinite(next_states).all():
+                bad_rows = (~torch.isfinite(next_states).all(dim=1)).nonzero(as_tuple=False).squeeze(1).cpu().numpy()
+                print(f"⚠️  Warning: Non-finite entries in next_states at indices {bad_rows}; zeroing those rows")
+                next_states[~torch.isfinite(next_states).all(dim=1)] = 0.0
+
+            # Clip extreme values to avoid exploding activations in the network
+            next_states = torch.clamp(next_states, -10.0, 10.0)
+
             next_q_values = self.target_net(next_states).max(1)[0]
-            target_q_values = rewards + (1 - dones) * self.gamma * next_q_values
+
+            # Build targets robustly to avoid NaN propagation when next_q_values contains NaNs
+            target_q_values = rewards.clone()
+            non_final_mask = (dones == 0)
+            if non_final_mask.any():
+                idx = non_final_mask.nonzero(as_tuple=False).squeeze(1)
+                # Only use next_q_values for non-terminal transitions
+                target_q_values[idx] = rewards[idx] + self.gamma * next_q_values[idx]
+
             # Clamp targets to keep them in a sane numeric range
             target_q_values = torch.clamp(target_q_values, -50.0, 50.0)
             # Keep targets conservative to avoid exploding losses in online/manual play
@@ -288,8 +369,33 @@ class DQNAgent:
 
             return 0.0
 
-        # Compute loss
-        loss = self.criterion(current_q_values, target_q_values)
+        # Compute elementwise loss and apply importance-sampling weights if used
+        import torch.nn.functional as F
+        loss_elem = F.smooth_l1_loss(current_q_values, target_q_values, reduction='none')
+        loss = (loss_elem * weights).mean()
+
+        # Backprop with guard: check gradients for finiteness before optimizer.step
+        self.optimizer.zero_grad()
+        loss.backward()
+
+        # Check grads are finite
+        any_bad_grad = False
+        for p in self.policy_net.parameters():
+            if p.grad is None:
+                continue
+            if not torch.isfinite(p.grad).all():
+                any_bad_grad = True
+                break
+
+        if any_bad_grad:
+            print("⚠️  Warning: Non-finite gradients detected, skipping optimizer.step() and resetting optimizer state")
+            try:
+                # reset optimizer state to avoid perpetuating NaNs
+                self.optimizer.state = {}
+            except Exception:
+                pass
+            self.optimizer.zero_grad()
+            return 0.0
         
         # Check for NaN before backward pass
         if torch.isnan(loss) or torch.isinf(loss):
@@ -297,13 +403,42 @@ class DQNAgent:
             return 0.0
         
         # Optimize the model
-        self.optimizer.zero_grad()
-        loss.backward()
-        
         # Clip gradients to prevent exploding gradients (more aggressive)
         torch.nn.utils.clip_grad_norm_(self.policy_net.parameters(), max_norm=0.5)
-        
+
+        # Backup params before step in case step produces non-finite params
+        try:
+            param_snapshot = {k: v.detach().cpu().clone() for k, v in self.policy_net.state_dict().items()}
+        except Exception:
+            param_snapshot = None
+
         self.optimizer.step()
+
+        # Post-step check: ensure parameters are finite; revert and reduce LR if not
+        any_bad = False
+        for p in self.policy_net.parameters():
+            if not torch.isfinite(p).all():
+                any_bad = True
+                break
+        if any_bad:
+            print("⚠️  Non-finite parameters detected after optimizer.step(); reverting parameters and reducing LR")
+            # revert parameters if we have a snapshot
+            if param_snapshot is not None:
+                try:
+                    self.policy_net.load_state_dict(param_snapshot)
+                    # Reset optimizer state to avoid corrupt momentum
+                    self.optimizer.state = {}
+                except Exception as e:
+                    print(f"  Failed to revert parameters: {e}")
+            # Reduce learning rate to be conservative
+            try:
+                for g in self.optimizer.param_groups:
+                    if 'lr' in g:
+                        g['lr'] = float(g.get('lr', 1e-3) * 0.5)
+                print("  Reduced learning rate by 2x for safety")
+            except Exception:
+                pass
+            return 0.0
         
         self.training_step += 1
         
@@ -338,6 +473,15 @@ class DQNAgent:
             # Non-fatal: keep running but inform
             print("⚠️  Warning: Failed post-step parameter sanity check")
         
+        # For prioritized replay, update priorities proportional to abs(td-error)
+        if self.use_prioritized and indices is not None:
+            with torch.no_grad():
+                td_errors = (target_q_values - current_q_values).abs().cpu().numpy()
+            try:
+                self.memory.update_priorities(indices, td_errors)
+            except Exception:
+                pass
+
         del loss, current_q_values, target_q_values, next_q_values
         
         return loss_value

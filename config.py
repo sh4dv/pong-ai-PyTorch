@@ -24,7 +24,7 @@ LAUNCH_ANGLE_MIN_DEG = 15  # Min launch angle off horizontal (avoid straight lin
 LAUNCH_ANGLE_MAX_DEG = 60  # Max launch angle off horizontal
 
 # Game settings
-WINNING_SCORE = 3    # Points needed to win (longer episodes = more training steps)
+WINNING_SCORE = 5    # Points needed to win (longer episodes = more training steps)
 FPS = 60
 FRAME_SKIP = 1      # Number of frames to repeat each action (1 = no skip, 4 = 4x faster)
 
@@ -38,27 +38,33 @@ GRAY = (128, 128, 128)
 # ============================================================================
 
 # Reward values
-REWARD_HIT_BALL = 10.0       # Reward for hitting the ball with paddle (strong positive signal)
-REWARD_SCORE_POINT = 0.0   # DISABLED FOR NOW | Reward for scoring a point (main objective!)
+REWARD_HIT_BALL = 5.0       # Reward for hitting the ball with paddle (strong positive signal)
+REWARD_SCORE_POINT = 10.0   # DISABLED FOR NOW | Reward for scoring a point (main objective!)
 REWARD_LOSE_POINT = 0.0   # DISABLED FOR NOW | Penalty for opponent scoring (strong penalty)
-REWARD_NEUTRAL = 0.0     # DISABLED FOR NOW | Tiny step cost to avoid rewarding stalling
-REWARD_PROXIMITY = 0.4      # Reward shaping to pull paddle toward incoming ball
+REWARD_NEUTRAL = -0.01     # Tiny step cost to discourage doing nothing (penalize stalling)
+REWARD_PROXIMITY = 1.0      # Reward shaping to pull paddle toward incoming ball (increased)
 REWARD_MISS_BALL = -5.0     # Penalty when ball passes by paddle (strong penalty)
-REWARD_FAR_PENALTY = -0.01   # Softer penalty when far from ball
+REWARD_FAR_PENALTY = -0.10   # Softer penalty when far from ball (increased magnitude)
 
 # DQN Hyperparameters
 LEARNING_RATE = 0.0001       # Learning rate (increased to escape local minimum)
 GAMMA = 0.99                # Discount factor for future rewards
-EPSILON_START = 1.0         # Starting epsilon for epsilon-greedy
-EPSILON_END = 0.05           # Minimum epsilon value (higher for continuous exploration)
-EPSILON_DECAY = 0.999       # Epsilon decay rate per episode (slower decay)
+EPSILON_START = 0.9         # Starting epsilon for epsilon-greedy (slightly lower to favor early policy)
+EPSILON_END = 0.02           # Minimum epsilon value (reduce final exploration)
+EPSILON_DECAY = 0.999       # Epsilon decay rate per episode (faster decay to exploit learned policy)
 BATCH_SIZE = 128            # Batch size for training (larger for better GPU utilization)
 MEMORY_SIZE = 100_000         # Replay buffer capacity (reduce to save RAM)
 TARGET_UPDATE = 5           # Update target network every N episodes (frequent updates)
 
 # Neural Network Architecture
-HIDDEN_SIZE_1 = 256         # First hidden layer size (increased for better GPU utilization)
-HIDDEN_SIZE_2 = 256         # Second hidden layer size (increased for better GPU utilization)
+N_STEP = 3                  # N-step returns (helps propagate reward to earlier transitions)
+USE_PRIORITIZED_REPLAY = False  # Use prioritized replay buffer (may improve sample efficiency)
+
+# Reduced sizes for better throughput on lightweight hardware (e.g., M1 MacBook Air)
+# These are conservative defaults to balance speed and representational capacity
+HIDDEN_SIZE_1 = 128         # First hidden layer size
+HIDDEN_SIZE_2 = 128         # Second hidden layer size
+BATCH_SIZE = 256            # Batch size for training (better utilization when training less frequently)
 INPUT_SIZE = 8              # State size: [ball_x, ball_y, ball_vel_x, ball_vel_y, paddle1_center_y, paddle2_center_y, ball_speed_abs, ball_dist_paddle1]
 OUTPUT_SIZE = 3             # Action size: [0=none, 1=up, 2=down]
 

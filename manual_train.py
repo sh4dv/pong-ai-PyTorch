@@ -121,7 +121,8 @@ class ManualTrainer:
                         self.episode_reward_breakdown[k] += float(v)
 
             # Store transition and train online (only after warmup to stabilize)
-            self.agent.store_transition(state, action_left, reward, next_state, done)
+                # single-env path: use env_idx=0 for n-step handling
+                self.agent._store_transition_internal(state, action_left, reward, next_state, done, env_idx=0)
             self.transitions += 1
             # Wait until buffer has enough diverse samples before training
             if self.agent.memory.is_ready(max(self.batch_size, self.min_replay)):

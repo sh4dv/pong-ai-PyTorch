@@ -14,6 +14,7 @@ from gymnasium.vector import SyncVectorEnv, AsyncVectorEnv
 from pong_env import PongEnv
 from dqn_agent import DQNAgent
 from config import *
+import config
 
 # Optional rendering
 try:
@@ -34,7 +35,7 @@ class PongTrainer:
     
     def __init__(self, num_episodes=NUM_EPISODES, render_every=RENDER_EVERY,
                  save_every=SAVE_EVERY, log_every=LOG_EVERY, headless=True,
-                 num_envs=1, async_envs=False, frame_skip=FRAME_SKIP):
+                 num_envs=1, async_envs=False, frame_skip=FRAME_SKIP, train_every=1):
         """
         Initialize the trainer.
         
@@ -55,6 +56,7 @@ class PongTrainer:
         self.headless = headless or not RENDERING_AVAILABLE
         self.num_envs = num_envs
         self.frame_skip = frame_skip
+        self.train_every = max(1, int(train_every))
         
         # Create vectorized or single environment
         if num_envs > 1:
@@ -78,10 +80,12 @@ class PongTrainer:
         
         # Initialize agent
         self.agent = DQNAgent()
+        print(f"Training frequency: update every {self.train_every} simulator steps")
         
         # Adaptive batch size for vectorized training
         # More parallel data = larger batch size for better gradient estimates
-        self.batch_size = BATCH_SIZE if num_envs <= 8 else min(BATCH_SIZE * 2, 256)
+        base_batch = getattr(config, 'BATCH_SIZE', BATCH_SIZE)
+        self.batch_size = base_batch if num_envs <= 8 else min(base_batch * 2, 256)
         if self.batch_size > BATCH_SIZE:
             print(f"Using larger batch size ({self.batch_size}) for vectorized training")
         
@@ -199,6 +203,7 @@ class PongTrainer:
         truncated = False
         action_counts = {0: 0, 1: 0, 2: 0}  # Track action distribution
         
+        training_step = 0
         while not (terminated or truncated):
             # Select action for left paddle (AI agent)
             action = self.agent.select_action(state, training=True)
@@ -207,8 +212,8 @@ class PongTrainer:
             # Execute step in environment
             next_state, reward, terminated, truncated, info = self.env.step(action)
             
-            # Store transition in replay buffer
-            self.agent.store_transition(state, action, reward, next_state, terminated or truncated)
+            # Store transition in replay buffer (single-env uses env_idx=0)
+            self.agent._store_transition_internal(state, action, reward, next_state, terminated or truncated, env_idx=0)
 
             # Track reward sources for this episode if available
             if 'reward_breakdown' in info:
@@ -216,10 +221,12 @@ class PongTrainer:
                     if key in episode_breakdown:
                         episode_breakdown[key] += value
             
-            # Train the agent
-            loss = self.agent.train(self.batch_size)
-            if loss is not None:
-                episode_losses.append(loss)
+            # Train the agent at configured frequency
+            training_step += 1
+            if training_step % self.train_every == 0:
+                loss = self.agent.train(self.batch_size)
+                if loss is not None:
+                    episode_losses.append(loss)
             
             # Update state and statistics
             state = next_state
@@ -308,9 +315,9 @@ class PongTrainer:
             # Process each environment
             for i in range(self.num_envs):
                 if active_envs[i]:
-                    # Store transition
+                    # Store transition for env i (use internal n-step-aware method)
                     done = terminateds[i] or truncateds[i]
-                    self.agent.store_transition(states[i], actions[i], rewards[i], next_states[i], done)
+                    self.agent._store_transition_internal(states[i], actions[i], rewards[i], next_states[i], done, env_idx=i)
 
                     # Update reward breakdown if provided (handle different vector info shapes)
                     rb_env = self._extract_reward_breakdown(infos, i, breakdown_keys)
@@ -345,13 +352,9 @@ class PongTrainer:
                             final_scores_left.append(infos['score_left'][i])
                             final_scores_right.append(infos['score_right'][i])
             
-            # Train the agent with adaptive frequency based on number of environments
-            # More envs = more data per step, so we can train less frequently
-            # This reduces memory usage while maintaining training quality
+            # Train the agent at configured frequency
             training_step += 1
-            # For many envs, train less frequently but accumulate more data
-            train_freq = max(1, self.num_envs // 32)  # 160 envs: every 5 steps = 800 transitions before training
-            if training_step % train_freq == 0:
+            if training_step % self.train_every == 0:
                 loss = self.agent.train(self.batch_size)
                 if loss is not None:
                     all_losses.append(loss)
@@ -393,7 +396,7 @@ class PongTrainer:
         """
         pass
     
-    def train(self, resume_from=None):
+    def train(self, resume_from=None, resume_eps=None):
         """
         Run the training loop.
         
@@ -405,9 +408,15 @@ class PongTrainer:
         # Resume from checkpoint if specified
         if resume_from and os.path.exists(resume_from):
             self.agent.load(resume_from)
-            # Reopen exploration when resuming to escape bad local minima
-            self.agent.epsilon = max(self.agent.epsilon, 0.35)
-            print(f"Resumed training from {resume_from}")
+            # If caller requested a resume epsilon, apply it; otherwise reopen
+            # exploration to escape local minima using a conservative default
+            if resume_eps is not None:
+                self.agent.epsilon = float(resume_eps)
+                print(f"Resumed training from {resume_from} (epsilon set to {self.agent.epsilon:.3f})")
+            else:
+                # Reopen exploration when resuming to escape bad local minima
+                self.agent.epsilon = max(self.agent.epsilon, 0.35)
+                print(f"Resumed training from {resume_from} (epsilon elevated to {self.agent.epsilon:.3f})")
         
         print(f"\nStarting training for {self.num_episodes} episodes")
         print(f"Headless mode: {self.headless}")
@@ -424,6 +433,8 @@ class PongTrainer:
         print("-" * 60)
         
         start_time = time.time()
+        # Print an overall final summary with averages across the whole training run
+        self._print_final_summary(start_time, episodes_to_run)
         
         # Adjust episode count for vectorized training
         # Each "episode" now represents num_envs actual episodes
@@ -644,6 +655,78 @@ class PongTrainer:
         if self.vectorized and hasattr(self.env, 'close'):
             time.sleep(0.5)
 
+    def _print_final_summary(self, start_time, episodes_to_run):
+        """
+        Print final summary statistics after training completes.
+
+        Shows:
+          - Average prize (reward) per actual episode
+          - Average speed (episodes / second)
+          - Average positive/penalty mass and category sources across whole run
+        """
+        elapsed = time.time() - start_time
+
+        # Compute actual episode count (each vectorized iteration contains num_envs episodes)
+        total_iterations = len(self.episode_rewards)
+        actual_episodes = total_iterations * (self.num_envs if self.vectorized else 1)
+
+        # Average prize (total reward mass per actual episode)
+        if self.vectorized:
+            total_reward_mass = sum(self.episode_rewards) * self.num_envs
+        else:
+            total_reward_mass = sum(self.episode_rewards)
+        avg_prize = total_reward_mass / actual_episodes if actual_episodes > 0 else 0.0
+
+        # Average speed
+        avg_speed = actual_episodes / elapsed if elapsed > 0 else 0.0
+
+        # Positive / Penalty mass across entire run
+        total_pos = sum(s.get('pos', 0.0) for s in self.reward_signals)
+        total_neg = sum(s.get('neg', 0.0) for s in self.reward_signals)
+        total_mass = total_pos + total_neg
+
+        pos_per_episode = total_pos / actual_episodes if actual_episodes > 0 else 0.0
+        neg_per_episode = total_neg / actual_episodes if actual_episodes > 0 else 0.0
+
+        print("\nFinal summary (across entire training):")
+        print(f"  ✅ Average prize (reward) per episode: {avg_prize:.3f}")
+        print(f"  ⚡ Average speed: {avg_speed:.2f} eps/s ({actual_episodes} episodes in {elapsed:.1f}s)")
+
+        if total_mass == 0:
+            print("  ℹ️  No reward signal recorded during training (pos/neg totals = 0)")
+        else:
+            pos_pct = 100.0 * total_pos / total_mass
+            neg_pct = 100.0 * total_neg / total_mass
+            print(f"  🧭 Reward mass: positive={total_pos:.1f} ({pos_pct:.1f}%), penalty={total_neg:.1f} ({neg_pct:.1f}%)")
+            print(f"    → Average / episode: +{pos_per_episode:.3f}  /  -{neg_per_episode:.3f}")
+
+        # Aggregate category breakdown across all episodes
+        pos_by_key = {}
+        neg_by_key = {}
+        for rb in self.reward_breakdowns:
+            if not isinstance(rb, dict):
+                continue
+            for k, v in rb.items():
+                if v is None:
+                    continue
+                if v > 0:
+                    pos_by_key[k] = pos_by_key.get(k, 0.0) + float(v)
+                elif v < 0:
+                    neg_by_key[k] = neg_by_key.get(k, 0.0) + float(-v)
+
+        if pos_by_key:
+            tot_pos = sum(pos_by_key.values())
+            if tot_pos > 0:
+                print("  └─> Positive sources (distribution over + mass):")
+                for k, v in sorted(pos_by_key.items(), key=lambda x: -x[1])[:5]:
+                    print(f"       - {k}: {100.0 * v / tot_pos:.1f}% ({v:.1f})")
+        if neg_by_key:
+            tot_neg = sum(neg_by_key.values())
+            if tot_neg > 0:
+                print("  └─> Penalty sources (distribution over - mass):")
+                for k, v in sorted(neg_by_key.items(), key=lambda x: -x[1])[:5]:
+                    print(f"       - {k}: {100.0 * v / tot_neg:.1f}% ({v:.1f})")
+
 
 def main():
     """Main entry point for training."""
@@ -664,8 +747,15 @@ def main():
                        help='Run in headless mode (no rendering)')
     parser.add_argument('--frame-skip', type=int, default=FRAME_SKIP,
                        help='Number of frames to repeat each action (1=no skip, 4=4x faster, default=4)')
+    parser.add_argument('--train-every', type=int, default=4,
+                       help='How many simulator steps between weight updates (default=4)')
+    parser.add_argument('--use-prioritized', action='store_true', help='Use prioritized replay buffer (overrides config)')
+    parser.add_argument('--n-step', type=int, default=None, help='N for n-step returns (overrides config)')
+    parser.add_argument('--batch-size', type=int, default=None, help='Override batch size from config')
     parser.add_argument('--resume', type=str, default=None,
                        help='Path to checkpoint to resume from')
+    parser.add_argument('--eps', type=float, default=None,
+                       help='Initial epsilon to set (overrides checkpoint/default). Range 0.0-1.0')
     parser.add_argument('--fresh-start', action='store_true',
                        help='Ignore existing model and start from scratch (disables auto-resume)')
     
@@ -685,7 +775,35 @@ def main():
         elif args.resume:
             print(f'Warning: resume path {candidate} not found, starting fresh')
     
+    # Validate epsilon flag if provided
+    if args.eps is not None:
+        if args.eps < 0.0 or args.eps > 1.0:
+            parser.error('--eps must be between 0.0 and 1.0')
+
     # Create trainer
+    # Allow runtime overrides for prioritized replay / n-step / batch size
+    if args.use_prioritized:
+        try:
+            import config
+            config.USE_PRIORITIZED_REPLAY = True
+            print("Enabled prioritized replay (override)")
+        except Exception:
+            pass
+    if args.n_step is not None:
+        try:
+            import config
+            config.N_STEP = max(1, int(args.n_step))
+            print(f"Using N-step = {config.N_STEP} (override)")
+        except Exception:
+            pass
+    if args.batch_size is not None:
+        try:
+            import config
+            config.BATCH_SIZE = max(1, int(args.batch_size))
+            print(f"Batch size overridden to {config.BATCH_SIZE}")
+        except Exception:
+            pass
+
     trainer = PongTrainer(
         num_episodes=args.episodes,
         render_every=args.render_every,
@@ -694,11 +812,12 @@ def main():
         headless=args.headless,
         num_envs=args.num_envs,
         async_envs=args.async_envs,
-        frame_skip=args.frame_skip
+        frame_skip=args.frame_skip,
+        train_every=args.train_every
     )
     
-    # Start training
-    trainer.train(resume_from=resume_path)
+    # Start training (pass resume epsilon through)
+    trainer.train(resume_from=resume_path, resume_eps=args.eps)
 
 
 if __name__ == "__main__":

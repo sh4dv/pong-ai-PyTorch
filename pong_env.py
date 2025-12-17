@@ -187,6 +187,14 @@ class PongEnv(gym.Env):
             if done:
                 break
         
+        # Basic sanity-check for raw next_state before normalization: catch
+        # extremely large finite values that may indicate env/model corruption
+        if not np.isfinite(next_state).all() or (np.abs(next_state) > 1e6).any():
+            print("⚠️  Warning: Raw env state out-of-range detected; sanitizing next_state")
+            # Replace nan/inf and clip extreme magnitudes
+            next_state = np.nan_to_num(next_state, nan=0.0, posinf=1e6, neginf=-1e6)
+            next_state = np.clip(next_state, -1e6, 1e6)
+
         # Normalize state
         normalized_state = self._normalize_state(next_state)
         
