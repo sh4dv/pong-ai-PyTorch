@@ -3,40 +3,46 @@
 ## Prerequisites
 
 Activate the virtual environment before running any commands:
+
+- macOS / Linux:
 ```bash
+python3 -m venv .venv
 source .venv/bin/activate
+```
+- Windows (PowerShell):
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+```
+- Windows (cmd):
+```cmd
+python -m venv .venv
+.\.venv\Scripts\activate
 ```
 
 ---
 
-## 1. Training the AI Agent
+## 1. Training the AI
 
-### Fast Headless Training (Recommended for speed)
-Train without rendering for maximum speed:
+**Quick test (short):**
 ```bash
-python train.py --headless --episodes 500
+python train.py --headless --episodes 100
 ```
 
-### Standard Training
-Train for 1000 episodes (better results):
+**Standard training (recommended for short experiments):**
 ```bash
 python train.py --headless --episodes 1000
 ```
 
-### Long Training (Best Results)
-Train for 2000+ episodes for optimal performance:
+**Long training (recommended for better performance — defaults are larger):**
 ```bash
-python train.py --headless --episodes 2000
+python train.py --headless --episodes 3000
 ```
 
-### Custom Training
-Adjust all parameters:
-```bash
-python train.py --episodes 1500 --save-every 100 --log-every 10 --headless
-```
+**Note about vectorized training:** `--episodes` is interpreted as the total number of episodes across all environments. For example `--episodes 1000 --num-envs 4` runs 250 iterations × 4 envs = 1000 total episodes.
 
 **Training Parameters:**
-- `--episodes N` - Number of training episodes (default: 1000)
+- `--episodes N` - Number of training episodes (default: 3000)
 - `--headless` - Train without rendering (faster)
 - `--save-every N` - Save checkpoint every N episodes (default: 100)
 - `--log-every N` - Print statistics every N episodes (default: 10)
@@ -44,7 +50,7 @@ python train.py --episodes 1500 --save-every 100 --log-every 10 --headless
 
 **Example Output:**
 ```
-Episode 100/1000 | Reward: -3.20 | Length: 412 | Loss: 0.0987 | 
+Episode 100/3000 | Reward: -3.20 | Length: 412 | Loss: 0.0987 | 
 Score L/R: 3.5/10.0 | Epsilon: 0.904 | Speed: 13.21 eps/s
 ```
 
@@ -108,35 +114,6 @@ python play.py --games 5
 
 ---
 
-## Quick Start with Preset Profiles
-
-Use the quickstart script for easy access:
-
-```bash
-# Check installation
-python quickstart.py --check
-
-# Fast training (500 episodes)
-python quickstart.py --train fast
-
-# Standard training (1000 episodes)
-python quickstart.py --train standard
-
-# Long training (2000 episodes)
-python quickstart.py --train long
-
-# Debug with rendering (100 episodes)
-python quickstart.py --train debug
-
-# Play with trained model
-python quickstart.py --play
-
-# Human vs human mode
-python quickstart.py --human
-```
-
----
-
 ## Complete Training & Playing Workflow
 
 ### Step 1: Train the AI
@@ -195,27 +172,10 @@ python train.py --headless --episodes 500
 ```
 
 **Want to test setup:**
+
+To verify your installation, run a quick headless training session:
 ```bash
-python test_setup.py
-```
-
----
-
-## Performance Tips
-
-**Fastest Training:**
-```bash
-python train.py --headless --episodes 1000 --log-every 50
-```
-
-**Best Visual Feedback:**
-```bash
-python train.py --render-every 100 --episodes 1000 --log-every 10
-```
-
-**Optimal Balance:**
-```bash
-python train.py --headless --episodes 1500 --save-every 100 --log-every 20
+python train.py --headless --episodes 10
 ```
 
 ---
@@ -240,4 +200,18 @@ Watch the metrics during training:
 Redirect output to file:
 ```bash
 python train.py --headless --episodes 1000 | tee training_log.txt
+```
+
+### Evaluate and Debug
+- Evaluate a trained model:
+```bash
+python evaluate.py --model models/dqn_pong.pth --episodes 100
+```
+- Quick model check:
+```bash
+python check_model_status.py --model models/dqn_pong.pth
+```
+- Manual (human-in-the-loop) training:
+```bash
+python manual_train.py --games 10
 ```
